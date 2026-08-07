@@ -1,0 +1,22 @@
+# Python-generated files
+.DS_Store
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets / session state
+.env
+
+# Pipeline intermediate artifacts + session state
+data/
+
+# Runtime output
+logs/*.log
+
+.pytest_cache/
