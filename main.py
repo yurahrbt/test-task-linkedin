@@ -42,27 +42,32 @@ def main() -> None:
             raise SystemExit(1)
 
         try:
+            # Stage 1-2: Collect and rank (no side effects on LinkedIn).
+            # SelectorDriftError fires here, before any likes.
             try:
-                result = pipeline.collect_and_rank(session.page)
+                pool = pipeline.collect(session.page)
+                top_posts = pipeline.rank(pool)
             except SelectorDriftError as exc:
-                # Stop before ranking/commenting: every downstream decision would be
-                # built on engagement numbers the scraper could not actually read.
                 logger.error("[main] LinkedIn markup no longer matches the scraper: %s", exc)
                 raise SystemExit(1)
 
-            print_posts(result.posts)
-            save_json(config.Paths.FEED_POSTS_PATH, result.posts)
-            logger.info("[main] saved %d posts to %s", len(result.posts), config.Paths.FEED_POSTS_PATH)
+            # Stage 3: Like (irreversible mutation).
+            # Persist immediately so every attempted like is recorded even if
+            # the process crashes or the drafting stage fails later.
+            liked = pipeline.like(session.page, top_posts)
+            print_posts(liked)
+            save_json(config.Paths.FEED_POSTS_PATH, liked)
+            logger.info("[main] saved %d liked posts to %s", len(liked), config.Paths.FEED_POSTS_PATH)
 
-            save_json(config.Paths.RANKED_POSTS_PATH, result.ranked)
-            logger.info("[main] saved top %d ranked posts to %s", len(result.ranked), config.Paths.RANKED_POSTS_PATH)
+            save_json(config.Paths.RANKED_POSTS_PATH, liked)
+            logger.info("[main] saved top %d ranked posts to %s", len(liked), config.Paths.RANKED_POSTS_PATH)
 
+            # Stage 4: Draft comments (no side effects on LinkedIn).
+            # Pass all liked posts as candidates so the commenter can skip thin
+            # posts and AI-returned SKIPs while still reaching the target count.
             try:
-                drafts = pipeline.draft(result.ranked)
+                drafts = pipeline.draft(liked)
             except CommentingAuthError as exc:
-                # The credentials worked at preflight and stopped working mid-stage
-                # (revoked, quota removed). Leave drafts.json untouched rather than
-                # writing a half-real one.
                 logger.error("[main] %s", exc)
                 raise SystemExit(1)
 

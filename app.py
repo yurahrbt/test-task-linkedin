@@ -11,7 +11,6 @@ The pipeline enforces a strict stage order:
   4. **Draft** — generate AI comments for the top-ranked subset.
 """
 
-from dataclasses import dataclass
 import logging
 
 from playwright.sync_api import Page
@@ -26,41 +25,36 @@ from linkedin.liker import like_posts
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class RankedFeed:
-    """The feed posts and the smaller set selected for comment drafting."""
-
-    posts: list[ScrapedPost]
-    ranked: list[ScrapedPost]
-
-
 class EngagementPipeline:
-    """Coordinate the collect/rank/like/draft stages without owning browser state."""
+    """Coordinate the collect/rank/like/draft stages without owning browser state.
 
-    def collect_and_rank(self, page: Page) -> RankedFeed:
-        # Stage 1 — Collect a pool of posts without liking any of them.
-        pool = scrape_feed_posts(page, limit=config.Ranking.COLLECT_POOL_SIZE)
+    Each stage is a separate method so that callers (main.py) can persist
+    results incrementally — in particular after the irreversible *like* stage.
+    """
 
-        # Stage 2 — Rank the pool and select the top N most interesting.
-        top_posts = rank_posts(pool, top_n=config.Ranking.TOP_LIKE_COUNT)
+    def collect(self, page: Page) -> list[ScrapedPost]:
+        """Stage 1 — scrape a pool of posts without side effects."""
+        return scrape_feed_posts(page, limit=config.Ranking.COLLECT_POOL_SIZE)
 
-        # Stage 3 — Like only the posts that survived ranking.
-        liked = like_posts(page, top_posts)
+    def rank(self, pool: list[ScrapedPost]) -> list[ScrapedPost]:
+        """Stage 2 — score and select the most interesting posts."""
+        return rank_posts(pool, top_n=config.Ranking.TOP_LIKE_COUNT)
 
-        # The top RANKED_TOP_N of the liked posts are selected for comment drafting.
-        ranked = liked[: config.Ranking.RANKED_TOP_N]
+    def like(self, page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
+        """Stage 3 — navigate to each post and like it (irreversible)."""
+        return like_posts(page, posts)
 
-        logger.info(
-            "[pipeline] collected %d posts, liked %d, selected %d for drafting",
-            len(pool), len(liked), len(ranked),
-        )
-        return RankedFeed(posts=liked, ranked=ranked)
+    def draft(self, candidates: list[ScrapedPost]) -> list[CommentDraft]:
+        """Stage 4 — draft AI comments, walking candidates until target is met.
 
-    def draft(self, ranked: list[ScrapedPost]) -> list[CommentDraft]:
-        """Draft comments only after collection/ranking has completed."""
+        Thin posts and AI-returned SKIPs are skipped automatically; pass more
+        candidates than ``RANKED_TOP_N`` so the loop can compensate.
+        """
         try:
-            return draft_comments(ranked)
+            return draft_comments(
+                candidates, target_count=config.Ranking.RANKED_TOP_N,
+            )
         except CommentingAuthError:
-            # Do not convert credential failures into per-post draft failures; callers
-            # need to know that this stage did not complete.
+            # Do not convert credential failures into per-post draft failures;
+            # callers need to know that this stage did not complete.
             raise

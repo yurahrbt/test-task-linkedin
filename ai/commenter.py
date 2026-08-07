@@ -92,24 +92,60 @@ def verify_api_access(client: OpenAI | None = None) -> None:
     logger.info("[verify_api_access] OpenAI credentials accepted for %s", config.Commenting.MODEL)
 
 
-def draft_comments(posts: list[ScrapedPost], client: OpenAI | None = None) -> list[CommentDraft]:
+def draft_comments(
+    posts: list[ScrapedPost],
+    client: OpenAI | None = None,
+    *,
+    target_count: int = 3,
+) -> list[CommentDraft]:
+    """Draft up to *target_count* real comments by walking *posts* in order.
+
+    Posts without enough text for a meaningful comment are skipped, and so are
+    AI responses that return ``SKIP``.  The caller should pass more candidates
+    than *target_count* so the loop can keep going when thin posts or SKIPs
+    reduce the usable set.
+    """
+    from domain.ranking import has_commentable_text  # local to avoid circular import
+
     client = client or build_client()
     drafts: list[CommentDraft] = []
 
     for post in posts:
+        if len(drafts) >= target_count:
+            break
+
+        if not has_commentable_text(post):
+            logger.info(
+                "[draft_comments] skipping %s — post text too thin for a meaningful comment",
+                post.author,
+            )
+            continue
+
         try:
             comment = _generate_comment(client, post)
         except _CREDENTIAL_ERRORS as exc:
-            # Bail on the first one: the next post would fail identically, and drafts.json
-            # would otherwise look like a completed stage.
             raise CommentingAuthError(
                 f"OpenAI rejected the credentials while drafting comment {len(drafts) + 1} of "
                 f"{len(posts)}: {exc}. {len(drafts)} draft(s) were discarded. Check OPENAI_API_KEY."
             ) from exc
         except Exception as exc:
             logger.warning("[draft_comments] failed to draft comment for %s: %s", post.author, exc)
-            comment = f"failed: {exc}"
+            continue
+
+        if comment.upper().strip() == "SKIP":
+            logger.info(
+                "[draft_comments] AI returned SKIP for %s — moving to next candidate",
+                post.author,
+            )
+            continue
 
         drafts.append(CommentDraft(post=post, comment=comment))
+
+    if len(drafts) < target_count:
+        logger.warning(
+            "[draft_comments] only %d usable draft(s) obtained from %d candidate(s) "
+            "(target was %d)",
+            len(drafts), len(posts), target_count,
+        )
 
     return drafts

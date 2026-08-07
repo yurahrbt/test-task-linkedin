@@ -433,18 +433,24 @@ def detect_count_strategy(page: Page) -> CountStrategy:
     diagnostics: dict[str, str] = {}
     for strategy in COUNT_STRATEGIES:
         numbers_by_metric = {"reactions": 0, "comments": 0}
-        controls = 0
+        controls_by_metric = {"reactions": 0, "comments": 0}
         for index, card in sampled:
             for metric, candidates_fn in (("reactions", strategy.reactions), ("comments", strategy.comments)):
                 reading = _extract_count(card, candidates_fn, f"{strategy.name}/{metric}", index)
                 numbers_by_metric[metric] += reading.source == SOURCE_READ
-                controls += reading.source in (SOURCE_READ, SOURCE_NO_NUMBER)
+                controls_by_metric[metric] += reading.source in (SOURCE_READ, SOURCE_NO_NUMBER)
 
         diagnostics[strategy.name] = (
             f"reactions={numbers_by_metric['reactions']} number(s), "
-            f"comments={numbers_by_metric['comments']} number(s) from {controls} control(s)"
+            f"comments={numbers_by_metric['comments']} number(s) "
+            f"from {controls_by_metric['reactions']}+{controls_by_metric['comments']} control(s)"
         )
-        if all(numbers_by_metric.values()):
+        # Accept the strategy when a control was found for both metrics.  A quiet
+        # feed where every post has zero comments still exposes the control element
+        # (SOURCE_NO_NUMBER); requiring an explicit number (SOURCE_READ) would
+        # reject such feeds even though the extraction logic correctly treats the
+        # absent number as zero.
+        if all(controls_by_metric.values()):
             logger.info(
                 "[detect_count_strategy] using the %r layout (%s across %d sampled posts)",
                 strategy.name,
@@ -454,9 +460,10 @@ def detect_count_strategy(page: Page) -> CountStrategy:
             return strategy
 
     raise SelectorDriftError(
-        f"both reactions and comments could not be verified from the first {len(sampled)} posts "
-        f"using any known feed layout ({diagnostics}). Every number this run would report is "
-        "unverifiable — capture a feed card and refresh the count selectors in selectors.py."
+        f"both reactions and comments controls could not be verified from the first "
+        f"{len(sampled)} posts using any known feed layout ({diagnostics}). Every number "
+        "this run would report is unverifiable — capture a feed card and refresh the "
+        "count selectors in selectors.py."
     )
 
 

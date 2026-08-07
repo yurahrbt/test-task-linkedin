@@ -44,6 +44,9 @@ class Ranking:
     COLLECT_POOL_SIZE = 20
     TOP_LIKE_COUNT = 10
     RANKED_TOP_N = 3
+    # Posts shorter than this (after stripping whitespace/emoji) are too thin
+    # for the AI to draft a meaningful comment on.
+    MIN_COMMENT_TEXT_LENGTH = 30
 
 
 class Browser:
