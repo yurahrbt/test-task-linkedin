@@ -8,11 +8,19 @@ from ai.errors import CommentingAuthError
 from app import EngagementPipeline
 from linkedin.errors import LoginError, SelectorDriftError
 from linkedin.session import open_feed
-from output.persistence import save_json
+from output.persistence import merge_into_history, save_json
 from utils.logging_setup import setup_logging
 from output.reporting import print_drafts, print_posts
 
 logger = logging.getLogger("main")
+
+
+def _like_outcome_summary(posts: list) -> tuple[int, int, int]:
+    """Return (liked, skipped, failed) counts from post outcomes."""
+    liked = sum(1 for p in posts if p.outcome == "liked")
+    skipped = sum(1 for p in posts if p.outcome.startswith("skipped:"))
+    failed = sum(1 for p in posts if p.outcome.startswith("failed:"))
+    return liked, skipped, failed
 
 
 def main() -> None:
@@ -34,6 +42,8 @@ def main() -> None:
         logger.error("[main] %s", exc)
         raise SystemExit(1)
 
+    like_failure = False  # tracks whether the like stage had a total failure
+
     with sync_playwright() as playwright:
         try:
             session = open_feed(playwright)
@@ -51,16 +61,41 @@ def main() -> None:
                 logger.error("[main] LinkedIn markup no longer matches the scraper: %s", exc)
                 raise SystemExit(1)
 
+            # Persist the full collected pool to cumulative history (sorted by score).
+            # This builds a useful engagement log across runs even when individual
+            # stages fail later.
+            merge_into_history(config.Paths.POSTS_HISTORY_PATH, pool)
+
             # Stage 3: Like (irreversible mutation).
             # Persist immediately so every attempted like is recorded even if
             # the process crashes or the drafting stage fails later.
             liked = pipeline.like(session.page, top_posts)
             print_posts(liked)
             save_json(config.Paths.FEED_POSTS_PATH, liked)
-            logger.info("[main] saved %d liked posts to %s", len(liked), config.Paths.FEED_POSTS_PATH)
+            logger.info("[main] saved %d posts to %s", len(liked), config.Paths.FEED_POSTS_PATH)
 
             save_json(config.Paths.RANKED_POSTS_PATH, liked)
             logger.info("[main] saved top %d ranked posts to %s", len(liked), config.Paths.RANKED_POSTS_PATH)
+
+            # Update history with like outcomes.
+            merge_into_history(config.Paths.POSTS_HISTORY_PATH, liked)
+
+            # Report partial/total like failure clearly.
+            liked_count, skipped_count, failed_count = _like_outcome_summary(liked)
+            total = len(liked)
+            if total > 0 and liked_count == 0:
+                logger.error(
+                    "[main] TOTAL LIKE FAILURE: 0 of %d posts were liked "
+                    "(%d skipped, %d failed). The run performed no engagement.",
+                    total, skipped_count, failed_count,
+                )
+                like_failure = True
+            elif liked_count < total:
+                logger.warning(
+                    "[main] PARTIAL LIKE FAILURE: only %d of %d posts were liked "
+                    "(%d skipped, %d failed).",
+                    liked_count, total, skipped_count, failed_count,
+                )
 
             # Stage 4: Draft comments (no side effects on LinkedIn).
             # Pass all liked posts as candidates so the commenter can skip thin
@@ -76,6 +111,11 @@ def main() -> None:
             logger.info("[main] saved %d comment drafts to %s", len(drafts), config.Paths.DRAFTS_PATH)
         finally:
             session.close()
+
+    # Exit non-zero when the like stage performed no engagement at all, so that
+    # callers (CI, cron) can detect that the run was ineffective.
+    if like_failure:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

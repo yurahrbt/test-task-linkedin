@@ -4,6 +4,7 @@ import math
 import re
 import typing as tp
 from collections import Counter
+from urllib.parse import unquote
 
 from playwright.sync_api import Error as PlaywrightError, Locator, Page
 from pydantic import BaseModel
@@ -42,6 +43,14 @@ _SPACES = ("\u00a0", "\u202f", "\u2009", " ")  # nbsp, narrow nbsp, thin space, 
 _POST_URN_PATTERN = re.compile(r"urn:li:(?:activity|ugcPost|share):\d+")
 # Aggregated updates ("X and 3 others posted") wrap the real post URN.
 _AGGREGATE_URN_PATTERN = re.compile(r"urn:li:aggregate:\((urn:li:(?:activity|ugcPost|share):\d+)[,)]")
+
+# Patterns to extract a post URN from <a href> URLs on the card.
+_FEED_UPDATE_URL_RE = re.compile(
+    r"/feed/update/(urn:li:(?:activity|ugcPost|share):\d+)"
+)
+_POST_SLUG_ACTIVITY_RE = re.compile(
+    r"/posts/[^?#/]+[_-]activity-(\d+)"
+)
 
 
 class ScrapedPost(BaseModel):
@@ -236,7 +245,45 @@ def _post_urn(card: Locator) -> str | None:
             if urn:
                 return urn
 
+    # Fallback: extract a post URN from <a href> links anywhere on the card.
+    # On some feed variants the card itself exposes no data-urn attribute, but
+    # links (group highlights, timestamp anchors, social-actions links) carry a
+    # navigable activity URN in the path or a query parameter.
+    urn = _extract_urn_from_links(card)
+    if urn:
+        return urn
+
     return None
+
+
+def _extract_urn_from_links(card: Locator) -> str | None:
+    """Extract a post URN from any <a href> on the card.
+
+    Checks all links (not only ``/feed/update/`` or ``/posts/`` links) because
+    group-highlighted and reshare links embed the activity URN in query
+    parameters (e.g. ``highlightedUpdateUrn=urn%3Ali%3Aactivity%3A…``).
+    """
+    try:
+        hrefs = card.locator("a[href]").evaluate_all(
+            "nodes => nodes.slice(0, 30).map(n => n.getAttribute('href') || '')"
+        )
+    except PlaywrightError:
+        return None
+
+    for raw_href in hrefs:
+        # URL-decode so percent-encoded URNs (urn%3Ali%3A…) become matchable.
+        href = unquote(raw_href)
+
+        match = _FEED_UPDATE_URL_RE.search(href)
+        if match:
+            return match.group(1)
+        match = _POST_SLUG_ACTIVITY_RE.search(href)
+        if match:
+            return f"urn:li:activity:{match.group(1)}"
+        # Query-parameter URN (e.g. highlightedUpdateUrn=urn:li:activity:NNN).
+        urn_match = _POST_URN_PATTERN.search(href)
+        if urn_match:
+            return urn_match.group(0)
 
 
 def _as_post_urn(value: str | None) -> str | None:

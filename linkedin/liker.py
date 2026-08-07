@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 POST_URL_TEMPLATE = "https://www.linkedin.com/feed/update/{}/"
 
 
+def _resolve_url(post: ScrapedPost) -> str | None:
+    """Return a navigable URL for the post, or None if no URN is available."""
+    if post.urn:
+        return POST_URL_TEMPLATE.format(post.urn)
+    return None
+
+
 def _verify_liked(scope: Locator, index: int) -> bool:
     """Return True if the like icon has transitioned to the filled (liked) state."""
     try:
@@ -75,7 +82,8 @@ def like_posts(page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
     """
     results: list[ScrapedPost] = []
     for i, post in enumerate(posts):
-        if not post.urn:
+        url = _resolve_url(post)
+        if not url:
             logger.warning(
                 "[like_posts] post %d (%s): no URN, cannot navigate to like",
                 i + 1, post.author,
@@ -83,7 +91,6 @@ def like_posts(page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
             results.append(post.model_copy(update={"outcome": "skipped: no URN available"}))
             continue
 
-        url = POST_URL_TEMPLATE.format(post.urn)
         try:
             page.goto(url, wait_until="domcontentloaded")
             human_delay(config.RateLimits.NAV_DELAY)
@@ -99,4 +106,15 @@ def like_posts(page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
         results.append(post.model_copy(update={"outcome": outcome}))
         logger.info("[like_posts] post %d (%s): %s", i + 1, post.author, outcome)
 
+    liked_count = sum(1 for p in results if p.outcome == "liked")
+    skipped_count = sum(1 for p in results if p.outcome.startswith("skipped:"))
+    failed_count = sum(1 for p in results if p.outcome.startswith("failed:"))
+    logger.info(
+        "[like_posts] results: %d liked, %d already_liked, %d skipped, %d failed out of %d",
+        liked_count,
+        sum(1 for p in results if p.outcome == "already_liked"),
+        skipped_count,
+        failed_count,
+        len(results),
+    )
     return results

@@ -25,6 +25,7 @@ class Paths:
     FEED_POSTS_PATH = DATA_DIR / "feed_posts.json"
     RANKED_POSTS_PATH = DATA_DIR / "ranked.json"
     DRAFTS_PATH = DATA_DIR / "drafts.json"
+    POSTS_HISTORY_PATH = DATA_DIR / "posts_history.json"
 
 
 def ensure_dirs() -> None:
