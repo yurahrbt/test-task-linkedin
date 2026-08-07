@@ -74,8 +74,22 @@ def post_text(post: Locator) -> Locator:
 
 
 def post_author_link(post: Locator) -> Locator:
-    candidates = post.locator('a[href*="/in/"], a[href*="/company/"]')
-    return candidates.filter(has_text=re.compile(r"\S")).last
+    """Return the author link, scoped away from links in post content.
+
+    LinkedIn cards can contain tagged people, company links, and article CTAs after
+    the actor header. Prefer the actor region and the first matching link there;
+    retain a card-wide first-link fallback for feed variants without the known
+    actor wrapper.
+    """
+    author_links = 'a[href*="/in/"], a[href*="/company/"]'
+    actor_region = post.locator(
+        '[class*="update-components-actor"], [class*="feed-shared-actor"]'
+    ).first
+    if actor_region.count() > 0:
+        candidates = actor_region.locator(author_links)
+    else:
+        candidates = post.locator(author_links)
+    return candidates.filter(has_text=re.compile(r"\S")).first
 
 
 def load_more_button(page: Page) -> Locator:
