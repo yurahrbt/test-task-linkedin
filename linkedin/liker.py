@@ -6,7 +6,7 @@ not whichever posts happened to appear first in the feed.
 
 import logging
 
-from playwright.sync_api import Error as PlaywrightError, Page
+from playwright.sync_api import Error as PlaywrightError, Locator, Page
 
 import config
 from linkedin import selectors
@@ -19,8 +19,22 @@ logger = logging.getLogger(__name__)
 POST_URL_TEMPLATE = "https://www.linkedin.com/feed/update/{}/"
 
 
+def _verify_liked(scope: Locator, index: int) -> bool:
+    """Return True if the like icon has transitioned to the filled (liked) state."""
+    try:
+        icon_id = selectors.like_icon(scope).get_attribute(
+            "id", timeout=config.Timeouts.LIKE_VERIFY_TIMEOUT_MS
+        )
+    except PlaywrightError as exc:
+        logger.warning("[_verify_liked] post %d, icon unreadable after click: %s", index, exc)
+        return False
+
+    # A filled icon does NOT contain "outline" in its id.
+    return "outline" not in (icon_id or "")
+
+
 def _like_on_current_page(page: Page, index: int) -> str:
-    """Click the like button on the main post of the current page."""
+    """Click the like button on the main post of the current page and verify the result."""
     cards = selectors.feed_post_cards(page)
     scope = cards.first if cards.count() > 0 else page.locator("main")
 
@@ -44,6 +58,12 @@ def _like_on_current_page(page: Page, index: int) -> str:
         return f"failed: {exc}"
 
     human_delay(config.RateLimits.LIKE_DELAY)
+
+    # Verify the icon actually changed to the filled (liked) state.
+    if not _verify_liked(scope, index):
+        logger.warning("[_like_on_current_page] post %d, like not confirmed after click", index)
+        return "failed: like not confirmed (icon still in outline state)"
+
     return "liked"
 
 
