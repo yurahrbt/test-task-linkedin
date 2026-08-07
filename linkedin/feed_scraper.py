@@ -421,10 +421,10 @@ def detect_count_strategy(page: Page) -> CountStrategy:
     """Work out where this feed build keeps its engagement numbers, before anything is
     liked, by reading real numbers off real cards.
 
-    A strategy is only accepted once it has produced an actual number from a sampled
-    post; that is what later licenses treating an empty control as a zero. If no known
-    layout yields a single number, the run stops — reporting a feed of zeros would rank
-    the wrong posts and still like and comment on them."""
+    A strategy is only accepted once it has produced an actual number for both reactions
+    and comments from sampled posts; that is what later licenses treating an empty
+    control as a zero. If either metric cannot be verified, the run stops — reporting a
+    feed of zeros would rank the wrong posts and still like and comment on them."""
     cards = selectors.feed_post_cards(page)
     card_count = cards.count()
     if card_count == 0:
@@ -451,16 +451,19 @@ def detect_count_strategy(page: Page) -> CountStrategy:
 
     diagnostics: dict[str, str] = {}
     for strategy in COUNT_STRATEGIES:
-        numbers = 0
+        numbers_by_metric = {"reactions": 0, "comments": 0}
         controls = 0
         for index, card in sampled:
             for metric, candidates_fn in (("reactions", strategy.reactions), ("comments", strategy.comments)):
                 reading = _extract_count(card, candidates_fn, f"{strategy.name}/{metric}", index)
-                numbers += reading.source == SOURCE_READ
+                numbers_by_metric[metric] += reading.source == SOURCE_READ
                 controls += reading.source in (SOURCE_READ, SOURCE_NO_NUMBER)
 
-        diagnostics[strategy.name] = f"{numbers} number(s) from {controls} control(s)"
-        if numbers:
+        diagnostics[strategy.name] = (
+            f"reactions={numbers_by_metric['reactions']} number(s), "
+            f"comments={numbers_by_metric['comments']} number(s) from {controls} control(s)"
+        )
+        if all(numbers_by_metric.values()):
             logger.info(
                 "[detect_count_strategy] using the %r layout (%s across %d sampled posts)",
                 strategy.name,
@@ -470,9 +473,9 @@ def detect_count_strategy(page: Page) -> CountStrategy:
             return strategy
 
     raise SelectorDriftError(
-        f"no engagement numbers could be read from the first {len(sampled)} posts using any known "
-        f"feed layout ({diagnostics}). Every number this run would report is unverifiable — capture "
-        "a feed card and refresh the count selectors in dom_selectors.py."
+        f"both reactions and comments could not be verified from the first {len(sampled)} posts "
+        f"using any known feed layout ({diagnostics}). Every number this run would report is "
+        "unverifiable — capture a feed card and refresh the count selectors in selectors.py."
     )
 
 
