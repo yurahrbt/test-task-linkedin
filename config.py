@@ -69,6 +69,9 @@ class Scraping:
     # Below this many posts, "this metric never produced a number" is not yet evidence
     # of selector drift — a small quiet feed looks the same.
     MIN_CARDS_FOR_DRIFT_WARNING = 3
+    # Stop scrolling once this many consecutive rounds reveal no new post identities.
+    # Thin feeds otherwise repeat the same cards for every LOAD_MORE_MAX_ATTEMPTS round.
+    MAX_STAGNANT_LOAD_ATTEMPTS = 3
 
 
 class Timeouts:
@@ -79,8 +82,7 @@ class Timeouts:
     # by hand; only the known email-code flow is allowed to wait without a deadline.
     UNRECOGNIZED_CHALLENGE_WAIT_MS = 120_000
     ELEMENT_ACTION_TIMEOUT_MS = 3000
-    LIKE_VERIFY_TIMEOUT_MS = 3000
-    URN_VERIFY_TIMEOUT_MS = 5000
+    LIKE_VERIFY_TIMEOUT_MS = 5000
     POPUP_DISMISS_TIMEOUT_MS = 3000
     POPUP_RECHECK_TIMEOUT_MS = 500
     LOAD_MORE_MAX_ATTEMPTS = 15

@@ -97,11 +97,29 @@ def load_more_button(page: Page) -> Locator:
 
 
 def like_button(post: Locator) -> Locator:
-    return post.locator('button:has(svg[id^="thumbs-up-"])').first
+    """The reaction-state control on a post, whether reacted or not.
+
+    This feed build replaces ``thumbs-up-outline-small`` with a
+    ``*-consumption-small`` icon after a reaction is selected.
+    """
+    return post.locator(
+        'button:has(svg[id^="thumbs-up-"]), button:has(svg[id*="-consumption-"])'
+    ).first
 
 
 def like_icon(post: Locator) -> Locator:
-    return post.locator('svg[id^="thumbs-up-"]').first
+    return like_button(post).locator(
+        'svg[id^="thumbs-up-"], svg[id*="-consumption-"]'
+    ).first
+
+
+def like_reaction_option(page: Page) -> Locator:
+    """The explicit Like choice in the reaction picker opened by hovering."""
+    # Picker choices use the large icon. Restricting the size prevents accidentally
+    # matching another post's already-selected `like-consumption-small` control.
+    return page.locator(
+        'button:visible:has(svg[id^="like-consumption-"][id$="-large"])'
+    ).first
 
 
 # --- Engagement counts ----------------------------------------------------------
@@ -156,12 +174,11 @@ def comments_count_candidates(post: Locator) -> list[Locator]:
 # survive both the class hashing and the UI language, which nothing else on these cards
 # does. The count sits inside the button as plain text; the aria-label is the localized
 # action name ("Коментувати"), so the number has to come from the text.
-REACTIONS_ICON_PREFIX = "thumbs-up-"
 COMMENTS_ICON_PREFIX = "comment-"
 
 
 def action_bar_reactions_candidates(post: Locator) -> list[Locator]:
-    return [post.locator(f'button:has(svg[id^="{REACTIONS_ICON_PREFIX}"])')]
+    return [like_button(post)]
 
 
 def action_bar_comments_candidates(post: Locator) -> list[Locator]:

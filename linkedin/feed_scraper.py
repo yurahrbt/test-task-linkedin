@@ -4,7 +4,7 @@ import math
 import re
 import typing as tp
 from collections import Counter
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError, Locator, Page
 from pydantic import BaseModel
@@ -64,6 +64,12 @@ class ScrapedPost(BaseModel):
     engagement_score: float | None
     outcome: str
     urn: str | None = None
+    # Stable within a run even on feed variants that expose no activity URN.  The
+    # liking stage uses it to find the ranked card again in the live feed.
+    identity_key: str | None = None
+    # Reload-stable identity used to re-find the card in the feed. Unlike the
+    # de-dup fingerprint, it deliberately excludes relative timestamps.
+    feed_match_key: str | None = None
 
 
 class CountReading(tp.NamedTuple):
@@ -208,7 +214,13 @@ def _extract_count(
 
 
 def _extract_author(card: Locator, index: int) -> str:
-    author_raw = selectors.post_author_link(card).inner_text(timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS)
+    author_link = selectors.post_author_link(card)
+    # `inner_text()` waits for the full action timeout when the locator matches
+    # nothing.  Ads/widgets are stable non-post list items, so reject them with the
+    # immediate count check instead of paying that timeout on every scroll round.
+    if author_link.count() == 0:
+        return ""
+    author_raw = author_link.inner_text(timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS)
     author_lines = author_raw.strip().splitlines()
     return author_lines[0].strip() if author_lines else ""
 
@@ -245,10 +257,7 @@ def _post_urn(card: Locator) -> str | None:
             if urn:
                 return urn
 
-    # Fallback: extract a post URN from <a href> links anywhere on the card.
-    # On some feed variants the card itself exposes no data-urn attribute, but
-    # links (group highlights, timestamp anchors, social-actions links) carry a
-    # navigable activity URN in the path or a query parameter.
+    # Fallback: extract a post URN from a direct permalink on the card.
     urn = _extract_urn_from_links(card)
     if urn:
         return urn
@@ -257,12 +266,7 @@ def _post_urn(card: Locator) -> str | None:
 
 
 def _extract_urn_from_links(card: Locator) -> str | None:
-    """Extract a post URN from any <a href> on the card.
-
-    Checks all links (not only ``/feed/update/`` or ``/posts/`` links) because
-    group-highlighted and reshare links embed the activity URN in query
-    parameters (e.g. ``highlightedUpdateUrn=urn%3Ali%3Aactivity%3A…``).
-    """
+    """Extract a post URN only from a direct post permalink on the card."""
     try:
         hrefs = card.locator("a[href]").evaluate_all(
             "nodes => nodes.slice(0, 30).map(n => n.getAttribute('href') || '')"
@@ -280,10 +284,9 @@ def _extract_urn_from_links(card: Locator) -> str | None:
         match = _POST_SLUG_ACTIVITY_RE.search(href)
         if match:
             return f"urn:li:activity:{match.group(1)}"
-        # Query-parameter URN (e.g. highlightedUpdateUrn=urn:li:activity:NNN).
-        urn_match = _POST_URN_PATTERN.search(href)
-        if urn_match:
-            return urn_match.group(0)
+        # Do not accept arbitrary query-parameter URNs. Group-highlight links can
+        # reference a different update than the card and produced false targets in
+        # real runs. Only direct post permalinks above are trustworthy identities.
 
 
 def _as_post_urn(value: str | None) -> str | None:
@@ -337,6 +340,41 @@ SOURCE_URN = "urn"
 SOURCE_FINGERPRINT = "fingerprint"
 
 
+class CardSnapshot(tp.NamedTuple):
+    """The identifying content needed by both scraping and in-feed liking."""
+
+    author: str
+    text: str
+    identity: CardIdentity
+    feed_match_key: str
+
+
+def _feed_match_key(card: Locator, author: str, text: str) -> str:
+    """Build a card key that remains stable across a feed reload.
+
+    Relative timestamps can roll from ``59m`` to ``1h`` and signed media URLs can
+    rotate query strings, so neither is included verbatim in an action target.
+    """
+    try:
+        raw_sources = selectors.post_media_sources(card).evaluate_all(
+            "nodes => nodes.slice(0, 4).map(n => n.getAttribute('src') || n.getAttribute('href') || '')"
+        )
+    except PlaywrightError:
+        raw_sources = []
+
+    stable_sources: list[str] = []
+    for source in raw_sources:
+        try:
+            parsed = urlsplit(source)
+            stable_sources.append(urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")))
+        except (TypeError, ValueError):
+            stable_sources.append(str(source))
+
+    parts = [author, text, *stable_sources]
+    digest = hashlib.sha1("\x00".join(parts).encode("utf-8")).hexdigest()
+    return f"feed-match:{digest}"
+
+
 def _card_key(card: Locator, author: str, text: str, index: int) -> CardIdentity:
     """Stable identity for a feed card, resilient to the virtualized feed reordering or
     recycling DOM nodes."""
@@ -358,6 +396,26 @@ def _card_key(card: Locator, author: str, text: str, index: int) -> CardIdentity
     return CardIdentity(_card_fingerprint(card, author, text), SOURCE_FINGERPRINT)
 
 
+def inspect_post_card(card: Locator, index: int) -> CardSnapshot | None:
+    """Read a feed card without waiting on list items that are not posts."""
+    # A real actionable feed post must expose both an author and a Like control.
+    # These count checks do not wait, unlike inner_text/click operations.
+    if selectors.like_button(card).count() == 0:
+        return None
+
+    try:
+        author = _extract_author(card, index)
+        if not author:
+            return None
+        text = _extract_text(card)
+        identity = _card_key(card, author, text, index)
+    except PlaywrightError as exc:
+        logger.warning("[inspect_post_card] skipping card %d, inspection failed: %s", index, exc)
+        return None
+
+    return CardSnapshot(author, text, identity, _feed_match_key(card, author, text))
+
+
 def _scrape_single_post(
     card: Locator,
     index: int,
@@ -365,21 +423,16 @@ def _scrape_single_post(
     strategy: CountStrategy,
     run_stats: Counter[str] | None = None,
 ) -> ScrapedPost | None:
-    try:
-        author = _extract_author(card, index)
-    except PlaywrightError as exc:
-        logger.warning("[_scrape_single_post] skipping card %d, no author found: %s", index, exc)
+    snapshot = inspect_post_card(card, index)
+    if snapshot is None:
+        if run_stats is not None:
+            run_stats["cards:non-post"] += 1
         return None
 
-    if not author:
-        logger.warning("[_scrape_single_post] skipping card %d, author text is empty", index)
-        return None
-
-    text = _extract_text(card)
+    author, text, identity, feed_match_key = snapshot
 
     # De-dup BEFORE any side-effecting action (like) so a recycled/re-seen card is
     # never liked or scraped twice.
-    identity = _card_key(card, author, text, index)
     if run_stats is not None:
         run_stats[f"identity:{identity.source}"] += 1
     if identity.key in seen_keys:
@@ -413,6 +466,8 @@ def _scrape_single_post(
             engagement_score=None,
             outcome="skipped: engagement counts unreadable",
             urn=identity.key if identity.source == SOURCE_URN else None,
+            identity_key=identity.key,
+            feed_match_key=feed_match_key,
         )
 
     engagement_ratio = comments.value / max(likes.value, 1)
@@ -428,6 +483,8 @@ def _scrape_single_post(
         engagement_score=engagement_score,
         outcome="collected",
         urn=urn,
+        identity_key=identity.key,
+        feed_match_key=feed_match_key,
     )
 
 
@@ -551,18 +608,20 @@ def scrape_feed_posts(page: Page, limit: int) -> list[ScrapedPost]:
     seen_keys: set[str] = set()
     run_stats: Counter[str] = Counter()
     eligible_count = 0
+    stagnant_rounds = 0
 
     # Detect (and prove) where the counts live before the first like, not after the last.
     strategy = detect_count_strategy(page)
     run_stats[f"layout:{strategy.name}"] += 1
 
-    for _ in range(config.Timeouts.LOAD_MORE_MAX_ATTEMPTS):
+    for attempt in range(config.Timeouts.LOAD_MORE_MAX_ATTEMPTS):
         # The feed is virtualized: cards.count() is not monotonic and a positional
         # index does not identify a stable post across scrolls. Re-scan every currently
         # attached card each round; _scrape_single_post de-dups by stable key so
         # re-seeing a card is cheap and never double-processes it.
         cards = selectors.feed_post_cards(page)
         card_count = cards.count()
+        identities_before = len(seen_keys)
 
         for i in range(card_count):
             # Unreadable cards are retained for transparent output but are not eligible
@@ -578,6 +637,25 @@ def scrape_feed_posts(page: Page, limit: int) -> list[ScrapedPost]:
 
         if eligible_count >= limit:
             break
+
+        new_identities = len(seen_keys) - identities_before
+        if new_identities == 0:
+            stagnant_rounds += 1
+            logger.info(
+                "[scrape_feed_posts] load round %d found no new post identities (%d/%d stagnant)",
+                attempt + 1,
+                stagnant_rounds,
+                config.Scraping.MAX_STAGNANT_LOAD_ATTEMPTS,
+            )
+            if stagnant_rounds >= config.Scraping.MAX_STAGNANT_LOAD_ATTEMPTS:
+                logger.info(
+                    "[scrape_feed_posts] feed exhausted: stopping after %d consecutive "
+                    "rounds without a new post",
+                    stagnant_rounds,
+                )
+                break
+        else:
+            stagnant_rounds = 0
 
         _load_more_step(page)
 

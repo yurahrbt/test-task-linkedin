@@ -7,7 +7,7 @@ configuration, persistence, and presentation.
 The pipeline enforces a strict stage order:
   1. **Collect** — scrape a pool of posts from the feed without side effects.
   2. **Rank** — score and select the most interesting posts.
-  3. **Like** — navigate to each winning post and like it.
+  3. **Like** — find each winning post again in the feed and like it.
   4. **Draft** — generate AI comments for the top-ranked subset.
 """
 
@@ -41,7 +41,7 @@ class EngagementPipeline:
         return rank_posts(pool, top_n=config.Ranking.TOP_LIKE_COUNT)
 
     def like(self, page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
-        """Stage 3 — navigate to each post and like it (irreversible)."""
+        """Stage 3 — re-find each selected feed card and like it (irreversible)."""
         return like_posts(page, posts)
 
     def draft(self, candidates: list[ScrapedPost]) -> list[CommentDraft]:

@@ -17,7 +17,7 @@ logger = logging.getLogger("main")
 
 def _like_outcome_summary(posts: list) -> tuple[int, int, int]:
     """Return (liked, skipped, failed) counts from post outcomes."""
-    liked = sum(1 for p in posts if p.outcome == "liked")
+    liked = sum(1 for p in posts if p.outcome in ("liked", "already_liked"))
     skipped = sum(1 for p in posts if p.outcome.startswith("skipped:"))
     failed = sum(1 for p in posts if p.outcome.startswith("failed:"))
     return liked, skipped, failed
@@ -83,7 +83,12 @@ def main() -> None:
             # Report partial/total like failure clearly.
             liked_count, skipped_count, failed_count = _like_outcome_summary(liked)
             total = len(liked)
-            if total > 0 and liked_count == 0:
+            if total == 0:
+                logger.error(
+                    "[main] TOTAL LIKE FAILURE: the exhausted feed produced no eligible posts."
+                )
+                like_failure = True
+            elif liked_count == 0:
                 logger.error(
                     "[main] TOTAL LIKE FAILURE: 0 of %d posts were liked "
                     "(%d skipped, %d failed). The run performed no engagement.",
@@ -98,13 +103,34 @@ def main() -> None:
                 )
 
             # Stage 4: Draft comments (no side effects on LinkedIn).
-            # Pass all liked posts as candidates so the commenter can skip thin
-            # posts and AI-returned SKIPs while still reaching the target count.
-            try:
-                drafts = pipeline.draft(liked)
-            except CommentingAuthError as exc:
-                logger.error("[main] %s", exc)
-                raise SystemExit(1)
+            # Only posts that were actually liked are valid comment candidates.
+            # Drafting for failed/skipped posts would produce polished comments
+            # for content the user never engaged with — misleading output.
+            successfully_liked = [p for p in liked if p.outcome in ("liked", "already_liked")]
+
+            if like_failure:
+                logger.error(
+                    "[main] Level 1 (Like) did not complete — skipping Level 2 (Draft). "
+                    "No comments will be generated because no posts were liked.",
+                )
+                drafts: list = []
+            elif not successfully_liked:
+                logger.warning(
+                    "[main] No successfully-liked posts available for comment drafting.",
+                )
+                drafts = []
+            else:
+                if len(successfully_liked) < len(liked):
+                    logger.info(
+                        "[main] %d of %d posts were successfully liked — "
+                        "only those will be used for comment drafting.",
+                        len(successfully_liked), len(liked),
+                    )
+                try:
+                    drafts = pipeline.draft(successfully_liked)
+                except CommentingAuthError as exc:
+                    logger.error("[main] %s", exc)
+                    raise SystemExit(1)
 
             print_drafts(drafts)
             save_json(config.Paths.DRAFTS_PATH, drafts)
