@@ -26,6 +26,25 @@ def _resolve_url(post: ScrapedPost) -> str | None:
     return None
 
 
+def _find_verified_scope(page: Page, urn: str) -> Locator | None:
+    """Find a DOM element on the current page whose URN matches the target post.
+
+    Waits briefly for a ``data-urn`` or ``data-id`` attribute carrying the exact
+    target URN.  Returns the matching locator (scoped to the verified element) or
+    *None* if the identity cannot be confirmed — indicating a redirect to the feed,
+    an error page, or a different post.
+    """
+    selector = ", ".join(
+        f'[{attr}="{urn}"]'
+        for attr in selectors.POST_URN_ATTRIBUTES
+    )
+    try:
+        page.wait_for_selector(selector, timeout=config.Timeouts.URN_VERIFY_TIMEOUT_MS)
+        return page.locator(selector).first
+    except PlaywrightError:
+        return None
+
+
 def _verify_liked(scope: Locator, index: int) -> bool:
     """Return True if the like icon has transitioned to the filled (liked) state."""
     try:
@@ -40,10 +59,21 @@ def _verify_liked(scope: Locator, index: int) -> bool:
     return "outline" not in (icon_id or "")
 
 
-def _like_on_current_page(page: Page, index: int) -> str:
-    """Click the like button on the main post of the current page and verify the result."""
-    cards = selectors.feed_post_cards(page)
-    scope = cards.first if cards.count() > 0 else page.locator("main")
+def _like_on_current_page(page: Page, urn: str, index: int) -> str:
+    """Click the like button on a post whose URN identity has been verified.
+
+    First confirms that the current page contains a DOM element carrying the
+    target URN.  If the post cannot be identified the action is aborted to
+    avoid liking the wrong post (e.g. after a redirect).
+    """
+    scope = _find_verified_scope(page, urn)
+    if scope is None:
+        logger.warning(
+            "[_like_on_current_page] post %d: URN %s not found on page — "
+            "possible redirect to feed or error page, aborting",
+            index, urn,
+        )
+        return "failed: target post not confirmed on page (URN mismatch)"
 
     try:
         icon_id = selectors.like_icon(scope).get_attribute(
@@ -95,7 +125,7 @@ def like_posts(page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
             page.goto(url, wait_until="domcontentloaded")
             human_delay(config.RateLimits.NAV_DELAY)
             dismiss_popup_if_present(page, timeout=config.Timeouts.POPUP_RECHECK_TIMEOUT_MS)
-            outcome = _like_on_current_page(page, i)
+            outcome = _like_on_current_page(page, post.urn, i)
         except PlaywrightError as exc:
             logger.warning(
                 "[like_posts] post %d (%s): navigation failed: %s",
