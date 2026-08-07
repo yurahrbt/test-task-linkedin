@@ -41,6 +41,7 @@ class RateLimits:
 
 
 class Ranking:
+    COLLECT_POOL_SIZE = 20
     TOP_LIKE_COUNT = 10
     RANKED_TOP_N = 3
 

@@ -54,6 +54,7 @@ class ScrapedPost(BaseModel):
     engagement_ratio: float | None
     engagement_score: float | None
     outcome: str
+    urn: str | None = None
 
 
 class CountReading(tp.NamedTuple):
@@ -210,28 +211,6 @@ def _extract_text(card: Locator) -> str:
     return text_locator.inner_text(timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS).strip()
 
 
-def _like_post(card: Locator, index: int) -> str:
-    try:
-        icon_id = selectors.like_icon(card).get_attribute("id", timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS)
-    except PlaywrightError as exc:
-        logger.warning("[_like_post] card %d, no like icon found: %s", index, exc)
-        return f"failed: no like icon ({exc})"
-
-    if "outline" not in (icon_id or ""):
-        return "already_liked"
-
-    dismiss_popup_if_present(card.page, timeout=config.Timeouts.POPUP_RECHECK_TIMEOUT_MS)
-
-    try:
-        selectors.like_button(card).click(timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS)
-    except PlaywrightError as exc:
-        logger.warning("[_like_post] card %d, like click failed: %s", index, exc)
-        return f"failed: {exc}"
-
-    human_delay(config.RateLimits.LIKE_DELAY)
-    return "liked"
-
-
 def _post_urn(card: Locator) -> str | None:
     """The card's activity URN, or None if the feed does not expose one.
 
@@ -386,11 +365,12 @@ def _scrape_single_post(
             engagement_ratio=None,
             engagement_score=None,
             outcome="skipped: engagement counts unreadable",
+            urn=identity.key if identity.source == SOURCE_URN else None,
         )
 
     engagement_ratio = comments.value / max(likes.value, 1)
     engagement_score = comments.value / math.sqrt(max(likes.value, 1))
-    outcome = _like_post(card, index)
+    urn = identity.key if identity.source == SOURCE_URN else None
 
     return ScrapedPost(
         author=author,
@@ -399,7 +379,8 @@ def _scrape_single_post(
         comments_count=comments.value,
         engagement_ratio=engagement_ratio,
         engagement_score=engagement_score,
-        outcome=outcome,
+        outcome="collected",
+        urn=urn,
     )
 
 

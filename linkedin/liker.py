@@ -1,0 +1,82 @@
+"""Dedicated liking stage — navigates to each post by URN and likes it.
+
+Separated from feed collection so that only posts that survive ranking are liked,
+not whichever posts happened to appear first in the feed.
+"""
+
+import logging
+
+from playwright.sync_api import Error as PlaywrightError, Page
+
+import config
+from linkedin import selectors
+from linkedin.feed_scraper import ScrapedPost
+from utils.popup_handler import dismiss_popup_if_present
+from utils.rate_limiter import human_delay
+
+logger = logging.getLogger(__name__)
+
+POST_URL_TEMPLATE = "https://www.linkedin.com/feed/update/{}/"
+
+
+def _like_on_current_page(page: Page, index: int) -> str:
+    """Click the like button on the main post of the current page."""
+    cards = selectors.feed_post_cards(page)
+    scope = cards.first if cards.count() > 0 else page.locator("main")
+
+    try:
+        icon_id = selectors.like_icon(scope).get_attribute(
+            "id", timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS
+        )
+    except PlaywrightError as exc:
+        logger.warning("[_like_on_current_page] post %d, no like icon found: %s", index, exc)
+        return f"failed: no like icon ({exc})"
+
+    if "outline" not in (icon_id or ""):
+        return "already_liked"
+
+    dismiss_popup_if_present(page, timeout=config.Timeouts.POPUP_RECHECK_TIMEOUT_MS)
+
+    try:
+        selectors.like_button(scope).click(timeout=config.Timeouts.ELEMENT_ACTION_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        logger.warning("[_like_on_current_page] post %d, like click failed: %s", index, exc)
+        return f"failed: {exc}"
+
+    human_delay(config.RateLimits.LIKE_DELAY)
+    return "liked"
+
+
+def like_posts(page: Page, posts: list[ScrapedPost]) -> list[ScrapedPost]:
+    """Navigate to each post by URN and like it.
+
+    Returns a new list of posts with the ``outcome`` field updated to reflect
+    the result of the like attempt.
+    """
+    results: list[ScrapedPost] = []
+    for i, post in enumerate(posts):
+        if not post.urn:
+            logger.warning(
+                "[like_posts] post %d (%s): no URN, cannot navigate to like",
+                i + 1, post.author,
+            )
+            results.append(post.model_copy(update={"outcome": "skipped: no URN available"}))
+            continue
+
+        url = POST_URL_TEMPLATE.format(post.urn)
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            human_delay(config.RateLimits.NAV_DELAY)
+            dismiss_popup_if_present(page, timeout=config.Timeouts.POPUP_RECHECK_TIMEOUT_MS)
+            outcome = _like_on_current_page(page, i)
+        except PlaywrightError as exc:
+            logger.warning(
+                "[like_posts] post %d (%s): navigation failed: %s",
+                i + 1, post.author, exc,
+            )
+            outcome = f"failed: navigation error ({exc})"
+
+        results.append(post.model_copy(update={"outcome": outcome}))
+        logger.info("[like_posts] post %d (%s): %s", i + 1, post.author, outcome)
+
+    return results

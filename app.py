@@ -3,6 +3,12 @@
 This module owns the order and failure boundaries between the domain stages. Browser
 automation, ranking, and AI drafting remain separate services; the CLI only handles
 configuration, persistence, and presentation.
+
+The pipeline enforces a strict stage order:
+  1. **Collect** — scrape a pool of posts from the feed without side effects.
+  2. **Rank** — score and select the most interesting posts.
+  3. **Like** — navigate to each winning post and like it.
+  4. **Draft** — generate AI comments for the top-ranked subset.
 """
 
 from dataclasses import dataclass
@@ -15,6 +21,7 @@ from ai.commenter import CommentDraft, draft_comments
 from ai.errors import CommentingAuthError
 from domain.ranking import rank_posts
 from linkedin.feed_scraper import ScrapedPost, scrape_feed_posts
+from linkedin.liker import like_posts
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +35,26 @@ class RankedFeed:
 
 
 class EngagementPipeline:
-    """Coordinate the read/react/rank/draft stages without owning browser state."""
+    """Coordinate the collect/rank/like/draft stages without owning browser state."""
 
     def collect_and_rank(self, page: Page) -> RankedFeed:
-        posts = scrape_feed_posts(page, limit=config.Ranking.TOP_LIKE_COUNT)
-        ranked = rank_posts(posts, top_n=config.Ranking.RANKED_TOP_N)
-        logger.info("[pipeline] collected %d posts and selected %d for drafting", len(posts), len(ranked))
-        return RankedFeed(posts=posts, ranked=ranked)
+        # Stage 1 — Collect a pool of posts without liking any of them.
+        pool = scrape_feed_posts(page, limit=config.Ranking.COLLECT_POOL_SIZE)
+
+        # Stage 2 — Rank the pool and select the top N most interesting.
+        top_posts = rank_posts(pool, top_n=config.Ranking.TOP_LIKE_COUNT)
+
+        # Stage 3 — Like only the posts that survived ranking.
+        liked = like_posts(page, top_posts)
+
+        # The top RANKED_TOP_N of the liked posts are selected for comment drafting.
+        ranked = liked[: config.Ranking.RANKED_TOP_N]
+
+        logger.info(
+            "[pipeline] collected %d posts, liked %d, selected %d for drafting",
+            len(pool), len(liked), len(ranked),
+        )
+        return RankedFeed(posts=liked, ranked=ranked)
 
     def draft(self, ranked: list[ScrapedPost]) -> list[CommentDraft]:
         """Draft comments only after collection/ranking has completed."""
